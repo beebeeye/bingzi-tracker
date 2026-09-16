@@ -16,7 +16,27 @@ const STORAGE_BLOCKS = 'bingzi_focus_blocks';
 const BASE_WEIGHT = 1;
 const WEIGHT_PER_BLOCK = 0.1;
 const BLOCKS_PER_DAY = 24 * 4;
-const MAX_WEIGHT = 24 * 0.1 * 4;
+const DAYS_PER_WEEK = 7;
+const BLOCKS_PER_WEEK = BLOCKS_PER_DAY * DAYS_PER_WEEK;
+const MAX_WEIGHT = BASE_WEIGHT + 24 * 0.1 * 4 * DAYS_PER_WEEK;
+
+const MONSTER_PALETTES = [
+  { body: '#FCD34D', blush: '#F87171', leaf: '#10B981' },
+  { body: '#FB923C', blush: '#F472B6', leaf: '#34D399' },
+  { body: '#A3E635', blush: '#FB7185', leaf: '#22C55E' },
+  { body: '#67E8F9', blush: '#F472B6', leaf: '#10B981' },
+  { body: '#C4B5FD', blush: '#FB7185', leaf: '#34D399' },
+  { body: '#F9A8D4', blush: '#FB7185', leaf: '#22C55E' },
+  { body: '#FDE68A', blush: '#F87171', leaf: '#14B8A6' },
+];
+
+function monsterPaletteForWeek(weekStartKey) {
+  let hash = 0;
+  for (let i = 0; i < weekStartKey.length; i += 1) {
+    hash = (hash * 31 + weekStartKey.charCodeAt(i)) >>> 0;
+  }
+  return MONSTER_PALETTES[hash % MONSTER_PALETTES.length];
+}
 
 function toDateKey(date) {
   const y = date.getFullYear();
@@ -61,9 +81,22 @@ function shiftDateKey(dateKey, days) {
   return toDateKey(addDays(parseDateKey(dateKey), days));
 }
 
-function HourCircles({ blocks, onOpenNote, onAddEmpty }) {
+function clampDayBlocks(blocks) {
+  if (!Array.isArray(blocks)) return [];
+  return blocks.slice(0, BLOCKS_PER_DAY);
+}
+
+function msUntilNextLocalMidnight(from = new Date()) {
+  const next = new Date(from);
+  next.setHours(24, 0, 0, 0);
+  return Math.max(1, next.getTime() - from.getTime());
+}
+
+function HourCircles({ blocks, onOpenNote, onAddEmpty, atDailyCap }) {
   const filledCount = blocks.length;
-  const totalCirclesNeeded = Math.max(1, Math.ceil((filledCount + 1) / 4));
+  const totalCirclesNeeded = atDailyCap
+    ? Math.ceil(BLOCKS_PER_DAY / 4)
+    : Math.max(1, Math.ceil((filledCount + 1) / 4));
   const circles = Array.from({ length: totalCirclesNeeded }, (_, circleIdx) => {
     const quarters = Array.from({ length: 4 }, (_, quarterIdx) => {
       const blockIndex = circleIdx * 4 + quarterIdx;
@@ -102,8 +135,12 @@ function HourCircles({ blocks, onOpenNote, onAddEmpty }) {
                       </motion.button>
                     ) : (
                       <div
-                        onClick={onAddEmpty}
-                        className="w-full h-full cursor-pointer hover:bg-slate-200/50 transition-colors rounded-tl-full"
+                        onClick={atDailyCap ? undefined : onAddEmpty}
+                        className={`w-full h-full rounded-tl-full ${
+                          atDailyCap
+                            ? 'cursor-default'
+                            : 'cursor-pointer hover:bg-slate-200/50 transition-colors'
+                        }`}
                       />
                     )}
                   </div>
@@ -126,12 +163,18 @@ export default function FocusTrackerApp() {
   const [hydrated, setHydrated] = useState(false);
   const [viewMode, setViewMode] = useState('day');
   const [viewDateKey, setViewDateKey] = useState(() => toDateKey(new Date()));
+  const [todayKey, setTodayKey] = useState(() => toDateKey(new Date()));
   const [frameWidth, setFrameWidth] = useState(448);
   const recordFrameRef = useRef(null);
   const feedTimerRef = useRef(null);
+  const midnightTimerRef = useRef(null);
+  const todayKeyRef = useRef(todayKey);
 
-  const todayKey = toDateKey(new Date());
   const isToday = viewDateKey === todayKey;
+
+  useEffect(() => {
+    todayKeyRef.current = todayKey;
+  }, [todayKey]);
 
   useEffect(() => {
     const savedHistory = localStorage.getItem(STORAGE_HISTORY);
@@ -149,26 +192,89 @@ export default function FocusTrackerApp() {
       }
     }
 
-    if (savedBlocks) {
+    const currentTodayKey = toDateKey(new Date());
+
+    // Dated draft only restores today's blocks. Undated leftover lists are ignored
+    // so yesterday never becomes today's starting total.
+    if (savedBlocks && !Array.isArray(hist[currentTodayKey])) {
       try {
-        const blocks = JSON.parse(savedBlocks);
-        if (Array.isArray(blocks) && blocks.length > 0 && !hist[todayKey]) {
-          hist = { ...hist, [todayKey]: blocks };
+        const parsed = JSON.parse(savedBlocks);
+        if (
+          parsed &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          parsed.date === currentTodayKey &&
+          Array.isArray(parsed.blocks)
+        ) {
+          hist = { ...hist, [currentTodayKey]: clampDayBlocks(parsed.blocks) };
+        } else if (
+          Array.isArray(parsed) &&
+          parsed.length > 0 &&
+          Object.keys(hist).length === 0
+        ) {
+          hist = { [currentTodayKey]: clampDayBlocks(parsed) };
         }
       } catch (e) {
         console.error(e);
       }
     }
 
-    setHistory(hist);
+    const normalized = {};
+    Object.entries(hist).forEach(([key, dayBlocks]) => {
+      normalized[key] = clampDayBlocks(dayBlocks);
+    });
+    if (!Array.isArray(normalized[currentTodayKey])) {
+      normalized[currentTodayKey] = [];
+    }
+
+    setHistory(normalized);
+    setTodayKey(currentTodayKey);
     setHydrated(true);
-  }, [todayKey]);
+  }, []);
 
   useEffect(() => {
     if (!hydrated) return;
     localStorage.setItem(STORAGE_HISTORY, JSON.stringify(history));
-    localStorage.setItem(STORAGE_BLOCKS, JSON.stringify(history[todayKey] || []));
+    localStorage.setItem(
+      STORAGE_BLOCKS,
+      JSON.stringify({ date: todayKey, blocks: history[todayKey] || [] })
+    );
   }, [history, hydrated, todayKey]);
+
+  useEffect(() => {
+    const rollToToday = () => {
+      const nextTodayKey = toDateKey(new Date());
+      const prevToday = todayKeyRef.current;
+      if (prevToday === nextTodayKey) return;
+      todayKeyRef.current = nextTodayKey;
+      setTodayKey(nextTodayKey);
+      setHistory(prev =>
+        Array.isArray(prev[nextTodayKey]) ? prev : { ...prev, [nextTodayKey]: [] }
+      );
+      setViewDateKey(current => (current === prevToday ? nextTodayKey : current));
+    };
+
+    const scheduleMidnightReset = () => {
+      if (midnightTimerRef.current) clearTimeout(midnightTimerRef.current);
+      midnightTimerRef.current = setTimeout(() => {
+        rollToToday();
+        scheduleMidnightReset();
+      }, msUntilNextLocalMidnight());
+    };
+
+    scheduleMidnightReset();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') rollToToday();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', rollToToday);
+
+    return () => {
+      if (midnightTimerRef.current) clearTimeout(midnightTimerRef.current);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', rollToToday);
+    };
+  }, []);
 
   useEffect(() => {
     const el = recordFrameRef.current;
@@ -191,14 +297,6 @@ export default function FocusTrackerApp() {
 
   const blocks = history[viewDateKey] || [];
   const filledCount = blocks.length;
-  const monsterWeight = parseFloat(
-    Math.min(BASE_WEIGHT + filledCount * WEIGHT_PER_BLOCK, MAX_WEIGHT).toFixed(1)
-  );
-  const minMonsterSize = frameWidth / 10;
-  const maxMonsterSize = frameWidth;
-  const growth = Math.min(filledCount / BLOCKS_PER_DAY, 1);
-  const monsterSize = minMonsterSize + growth * (maxMonsterSize - minMonsterSize);
-  const monsterScale = minMonsterSize > 0 ? monsterSize / minMonsterSize : 1;
 
   const playFeedAction = action => {
     setFeedAction(action);
@@ -210,7 +308,7 @@ export default function FocusTrackerApp() {
     setHistory(prev => {
       const current = prev[viewDateKey] || [];
       const next = typeof updater === 'function' ? updater(current) : updater;
-      return { ...prev, [viewDateKey]: next };
+      return { ...prev, [viewDateKey]: clampDayBlocks(next) };
     });
   };
 
@@ -243,13 +341,27 @@ export default function FocusTrackerApp() {
   const weekStartKey = toDateKey(weekStart);
   const canGoNextWeek = weekStartKey < currentWeekStartKey;
   const canGoNextDay = viewDateKey < todayKey;
+  const isCurrentWeek = weekStartKey === currentWeekStartKey;
+
+  const monsterWeight = parseFloat(
+    Math.min(BASE_WEIGHT + weekTotalBlocks * WEIGHT_PER_BLOCK, MAX_WEIGHT).toFixed(1)
+  );
+  const minMonsterSize = frameWidth / 10;
+  const maxMonsterSize = frameWidth;
+  const growth = Math.min(weekTotalBlocks / BLOCKS_PER_WEEK, 1);
+  const monsterSize = minMonsterSize + growth * (maxMonsterSize - minMonsterSize);
+  const monsterScale = minMonsterSize > 0 ? monsterSize / minMonsterSize : 1;
+  const monsterPalette = monsterPaletteForWeek(weekStartKey);
+
+  const atDailyCap = filledCount >= BLOCKS_PER_DAY;
 
   const handleAdd15Min = () => {
+    if (atDailyCap) return;
     const newBlock = {
       id: Date.now() + Math.random(),
       note: '',
     };
-    updateBlocks(prev => [...prev, newBlock]);
+    updateBlocks(prev => (prev.length >= BLOCKS_PER_DAY ? prev : [...prev, newBlock]));
     playFeedAction('eat');
   };
 
@@ -369,6 +481,7 @@ export default function FocusTrackerApp() {
               blocks={blocks}
               onOpenNote={openNoteModal}
               onAddEmpty={handleAdd15Min}
+              atDailyCap={atDailyCap}
             />
 
             <div className="flex items-center gap-4">
@@ -386,10 +499,16 @@ export default function FocusTrackerApp() {
               )}
 
               <motion.button
-                whileTap={{ scale: 0.95 }}
+                whileTap={atDailyCap ? undefined : { scale: 0.95 }}
                 onClick={handleAdd15Min}
-                className="flex items-center justify-center w-12 h-12 rounded-full bg-amber-500 hover:bg-amber-600 text-white shadow-md shadow-amber-200 transition-all"
+                disabled={atDailyCap}
+                className={`flex items-center justify-center w-12 h-12 rounded-full shadow-md transition-all ${
+                  atDailyCap
+                    ? 'bg-slate-200 text-slate-400 shadow-none cursor-not-allowed'
+                    : 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-200'
+                }`}
                 aria-label="+"
+                title={atDailyCap ? '当天累计已达 24 小时' : undefined}
               >
                 <Plus className="w-5 h-5" />
               </motion.button>
@@ -400,6 +519,9 @@ export default function FocusTrackerApp() {
               <span className="text-amber-600 text-sm font-bold">
                 {formatDuration(filledCount)}
               </span>
+              {atDailyCap && (
+                <div className="mt-1 text-[11px] font-medium text-slate-400">当天累计已达上限 24 小时</div>
+              )}
             </div>
           </>
         ) : (
@@ -486,16 +608,18 @@ export default function FocusTrackerApp() {
             }
           >
             <motion.svg
+              key={weekStartKey}
               viewBox="0 0 100 100"
               className="drop-shadow-md"
               data-monster-scale={monsterScale}
+              data-monster-week={weekStartKey}
               animate={{ width: monsterSize, height: monsterSize }}
               transition={{ type: 'spring', stiffness: 280, damping: 22 }}
               style={{ width: monsterSize, height: monsterSize }}
             >
-              <circle cx="50" cy="50" r="42" fill="#FCD34D" />
-              <circle cx="30" cy="55" r="6" fill="#F87171" opacity="0.4" />
-              <circle cx="70" cy="55" r="6" fill="#F87171" opacity="0.4" />
+              <circle cx="50" cy="50" r="42" fill={monsterPalette.body} />
+              <circle cx="30" cy="55" r="6" fill={monsterPalette.blush} opacity="0.4" />
+              <circle cx="70" cy="55" r="6" fill={monsterPalette.blush} opacity="0.4" />
               <circle cx="36" cy="45" r="4" fill="#1E293B" />
               <circle cx="64" cy="45" r="4" fill="#1E293B" />
               <circle cx="37.5" cy="43.5" r="1.5" fill="#FFFFFF" />
@@ -505,8 +629,8 @@ export default function FocusTrackerApp() {
               ) : (
                 <path d="M 42 58 Q 50 64 58 58" stroke="#1E293B" strokeWidth="3" strokeLinecap="round" fill="none" />
               )}
-              <path d="M 50 8 Q 45 0 40 4" stroke="#10B981" strokeWidth="3" strokeLinecap="round" fill="none" />
-              <path d="M 50 8 Q 55 0 60 4" stroke="#10B981" strokeWidth="3" strokeLinecap="round" fill="none" />
+              <path d="M 50 8 Q 45 0 40 4" stroke={monsterPalette.leaf} strokeWidth="3" strokeLinecap="round" fill="none" />
+              <path d="M 50 8 Q 55 0 60 4" stroke={monsterPalette.leaf} strokeWidth="3" strokeLinecap="round" fill="none" />
             </motion.svg>
           </motion.div>
 
@@ -539,7 +663,9 @@ export default function FocusTrackerApp() {
         </div>
 
         <div className="w-full mt-1 flex flex-col items-center border-t border-slate-100 pt-3 px-4">
-          <span className="text-xs text-slate-400">小怪物当前体重</span>
+          <span className="text-xs text-slate-400">
+            {isCurrentWeek ? '本周小怪物体重' : '当周小怪物体重'}
+          </span>
           <span className="text-lg font-bold text-slate-700">
             {monsterWeight.toFixed(1)} <span className="text-xs font-normal">kg</span>
           </span>
